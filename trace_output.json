@@ -1,0 +1,12 @@
+[
+  {
+    "lineno": 1,
+    "var": "x",
+    "value": "value_of_x"
+  },
+  {
+    "lineno": 2,
+    "var": "y",
+    "value": "value_of_y"
+  }
+]
