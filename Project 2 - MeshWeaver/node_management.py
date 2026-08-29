@@ -1,103 +1,132 @@
-from __future__ import annotations
+"""
+node_management.py
+-------------------
+Module: Node Management.
 
-from dataclasses import dataclass, field, asdict
-from enum import Enum
-from threading import RLock
-from time import time
-from typing import Any, Dict, List, Optional
+A NodeManager is the mesh's "who's who" -- a shared registry that the other
+modules read from and write to instead of passing raw (host, port) tuples
+around everywhere:
 
+  - kademlia_node_discovery writes new entries when a peer announces itself.
+  - gossip_protocol merges remote peer views into it.
+  - heartbeat_fault_tolerance flips entries to DEAD when a peer stops
+    answering, and back to ALIVE if it responds again.
+  - task_routing / rich_cli_dashboard read from it to know who's around.
 
-class NodeStatus(str, Enum):
-    ONLINE = "online"
-    OFFLINE = "offline"
-    SUSPECTED = "suspected"
+This module intentionally has no networking code of its own -- it is pure
+bookkeeping, which keeps it trivial to unit test and safe for every other
+module to depend on without circular imports.
+"""
+
+import logging
+import time
+from dataclasses import dataclass, field
+
+logger = logging.getLogger("meshweaver.node_management")
+
+ALIVE = "alive"
+SUSPECT = "suspect"
+DEAD = "dead"
 
 
 @dataclass
-class Node:
+class PeerInfo:
     node_id: str
-    host: str = "127.0.0.1"
-    port: int = 5000
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    status: NodeStatus = NodeStatus.ONLINE
-    last_heartbeat: float = field(default_factory=time)
+    host: str
+    port: int
+    status: str = ALIVE
+    cpu_percent: float = None
+    ram_percent: float = None
+    joined_at: float = field(default_factory=time.time)
+    last_seen: float = field(default_factory=time.time)
 
-    def touch(self) -> None:
-        self.last_heartbeat = time()
-        self.status = NodeStatus.ONLINE
-
-    def age(self) -> float:
-        return max(0.0, time() - self.last_heartbeat)
-
-    def to_dict(self) -> Dict[str, Any]:
-        data = asdict(self)
-        data["status"] = self.status.value
-        return data
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Node":
-        data = dict(data)
-        data["status"] = NodeStatus(data.get("status", NodeStatus.ONLINE))
-        return cls(**data)
+    @property
+    def address(self):
+        return (self.host, self.port)
 
 
-class NodeRegistry:
-    """Thread-safe in-memory registry for MeshWeaver nodes."""
+class NodeManager:
+    """In-memory registry of every peer this node currently knows about."""
 
-    def __init__(self) -> None:
-        self._nodes: Dict[str, Node] = {}
-        self._lock = RLock()
+    def __init__(self, self_id: str, self_host: str, self_port: int):
+        self.self_id = self_id
+        self.self_host = self_host
+        self.self_port = self_port
+        self._peers: dict[str, PeerInfo] = {}
 
-    def register(self, node: Node) -> Node:
-        with self._lock:
-            existing = self._nodes.get(node.node_id)
-            if existing:
-                existing.host = node.host
-                existing.port = node.port
-                existing.metadata.update(node.metadata)
-                existing.touch()
-                return existing
-            self._nodes[node.node_id] = node
-            return node
+    # ---------- membership ----------
 
-    def unregister(self, node_id: str) -> bool:
-        with self._lock:
-            return self._nodes.pop(node_id, None) is not None
+    def join(self, node_id: str, host: str, port: int) -> PeerInfo:
+        """Register a peer, or refresh it if already known."""
+        if node_id == self.self_id:
+            return None
+        existing = self._peers.get(node_id)
+        if existing:
+            existing.host, existing.port = host, port
+            existing.last_seen = time.time()
+            if existing.status != ALIVE:
+                logger.info("Peer %s is back (was %s)", node_id, existing.status)
+            existing.status = ALIVE
+            return existing
 
-    def get(self, node_id: str) -> Optional[Node]:
-        with self._lock:
-            return self._nodes.get(node_id)
+        info = PeerInfo(node_id=node_id, host=host, port=port)
+        self._peers[node_id] = info
+        logger.info("Peer joined: %s at %s:%s", node_id, host, port)
+        return info
 
-    def heartbeat(self, node_id: str) -> bool:
-        with self._lock:
-            node = self._nodes.get(node_id)
-            if not node:
-                return False
-            node.touch()
-            return True
+    def leave(self, node_id: str):
+        if self._peers.pop(node_id, None):
+            logger.info("Peer left: %s", node_id)
 
-    def mark_status(self, node_id: str, status: NodeStatus) -> bool:
-        with self._lock:
-            node = self._nodes.get(node_id)
-            if not node:
-                return False
-            node.status = status
-            return True
+    def mark_status(self, node_id: str, status: str):
+        peer = self._peers.get(node_id)
+        if peer and peer.status != status:
+            logger.info("Peer %s status: %s -> %s", node_id, peer.status, status)
+            peer.status = status
 
-    def all_nodes(self) -> List[Node]:
-        with self._lock:
-            return list(self._nodes.values())
+    def touch(self, node_id: str):
+        """Record that we just heard from this peer."""
+        peer = self._peers.get(node_id)
+        if peer:
+            peer.last_seen = time.time()
+            peer.status = ALIVE
 
-    def online_nodes(self) -> List[Node]:
-        return [n for n in self.all_nodes() if n.status == NodeStatus.ONLINE]
+    def update_load(self, node_id: str, cpu_percent: float, ram_percent: float):
+        peer = self._peers.get(node_id)
+        if peer:
+            peer.cpu_percent = cpu_percent
+            peer.ram_percent = ram_percent
 
-    def remove_stale(self, timeout: float) -> List[Node]:
-        removed = []
-        with self._lock:
-            for node_id, node in list(self._nodes.items()):
-                if node.age() > timeout:
-                    removed.append(self._nodes.pop(node_id))
-        return removed
+    # ---------- queries ----------
 
-    def to_dict(self) -> Dict[str, Dict[str, Any]]:
-        return {n.node_id: n.to_dict() for n in self.all_nodes()}
+    def get(self, node_id: str) -> PeerInfo:
+        return self._peers.get(node_id)
+
+    def all_peers(self, include_dead: bool = False) -> list[PeerInfo]:
+        return [p for p in self._peers.values() if include_dead or p.status != DEAD]
+
+    def alive_addresses(self) -> set[tuple[str, int]]:
+        return {p.address for p in self._peers.values() if p.status == ALIVE}
+
+    def as_address_list(self) -> list[tuple[str, str, int]]:
+        """(node_id, host, port) for every known peer -- the shape gossip/discovery ship over the wire."""
+        return [(p.node_id, p.host, p.port) for p in self._peers.values()]
+
+    def __len__(self):
+        return len(self._peers)
+
+
+if __name__ == "__main__":
+    manager = NodeManager("coordinator", "127.0.0.1", 9000)
+    manager.join("worker-1", "127.0.0.1", 9001)
+    manager.join("worker-2", "127.0.0.1", 9002)
+    manager.update_load("worker-1", cpu_percent=12.5, ram_percent=40.0)
+    manager.mark_status("worker-2", SUSPECT)
+
+    print(f"Known peers: {len(manager)}")
+    for peer in manager.all_peers():
+        print(f"  {peer.node_id} @ {peer.host}:{peer.port} [{peer.status}] cpu={peer.cpu_percent}")
+
+    manager.leave("worker-2")
+    print(f"After leave: {[p.node_id for p in manager.all_peers()]}")
+

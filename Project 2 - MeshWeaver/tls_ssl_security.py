@@ -1,3 +1,5 @@
+
+
 """
 tls.py
 ------
@@ -19,8 +21,8 @@ Two separate protections, both required by the problem statement:
    public key it already trusts for that sender.
 
 Builds on:
-  - asyn.Node                  (Module 1: transport)
-  - remote.serialize_task / deserialize_task  (Module 2: task packaging)
+  - async_networking.Node                              (Module 1: transport)
+  - task_serialization.serialize_task / deserialize_task (task packaging)
 """
 
 import asyncio
@@ -35,8 +37,9 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 
-from asyn import Node, Message
-from remote import serialize_task, deserialize_task, TaskExecutionError
+from async_networking import Node, Message
+from remote_task_execution import TaskExecutionError
+from task_serialization import serialize_task, deserialize_task
 
 logger = logging.getLogger("meshweaver.tls")
 
@@ -109,7 +112,7 @@ class SecureNode(Node):
         loop = asyncio.get_running_loop()
 
         # UDP stays plaintext -- only liveness pings travel here.
-        from asyn import _UDPProtocol
+        from async_networking import _UDPProtocol
         transport, _ = await loop.create_datagram_endpoint(
             lambda: _UDPProtocol(self), local_addr=(self.host, self.port)
         )
@@ -133,7 +136,7 @@ class SecureNode(Node):
         client_ctx.check_hostname = False
         client_ctx.verify_mode = ssl.CERT_NONE
 
-        from asyn import _write_framed, _read_framed
+        from async_networking import _write_framed, _read_framed
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port, ssl=client_ctx), timeout=timeout
         )

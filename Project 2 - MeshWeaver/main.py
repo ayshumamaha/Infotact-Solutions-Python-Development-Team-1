@@ -1,6 +1,3 @@
-# main.py
-# MeshWeaver Integration
-
 import asyncio
 
 from tls_ssl_security import SecureNode, SecureExecutor, generate_signing_keypair

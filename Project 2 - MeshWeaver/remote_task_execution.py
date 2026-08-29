@@ -25,7 +25,8 @@ import traceback
 
 import cloudpickle
 
-from asyn import Node, Message
+from async_networking import Node, Message
+from task_serialization import serialize_task, deserialize_task
 
 logger = logging.getLogger("meshweaver.remote_task_execution")
 
@@ -39,17 +40,6 @@ class TaskExecutionError(Exception):
     def __init__(self, remote_traceback: str):
         self.remote_traceback = remote_traceback
         super().__init__(f"Remote task failed:\n{remote_traceback}")
-
-
-def serialize_task(func, *args, **kwargs) -> bytes:
-    """Package a function + its args/kwargs into transmittable bytes."""
-    return cloudpickle.dumps({"func": func, "args": args, "kwargs": kwargs})
-
-
-def deserialize_task(data: bytes):
-    """Reverse of serialize_task. Returns (func, args, kwargs)."""
-    obj = cloudpickle.loads(data)
-    return obj["func"], obj["args"], obj["kwargs"]
 
 
 class RemoteExecutor:

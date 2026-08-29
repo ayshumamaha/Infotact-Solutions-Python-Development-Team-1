@@ -1,104 +1,50 @@
-from __future__ import annotations
 
-import base64
-import hashlib
-import json
-from typing import Any, Callable, Dict
+"""
+task_serialization.py
+----------------------
+Module: Task Serialization.
+
+Pulled out into its own module because both remote_task_execution.py and
+tls_ssl_security.py need the exact same packaging logic, and the README's
+project layout lists it as its own file.
+
+Uses cloudpickle instead of stdlib pickle because cloudpickle can serialize
+lambdas, closures, and functions defined interactively/locally -- plain
+pickle only handles functions importable by qualified name from a module,
+which is too restrictive for a task-submission API.
+"""
 
 import cloudpickle
 
 
-class TaskSerializationError(Exception):
-    """Raised when task serialization or deserialization fails."""
+def serialize_task(func, *args, **kwargs) -> bytes:
+    """Package a function + its args/kwargs into transmittable bytes."""
+    return cloudpickle.dumps({"func": func, "args": args, "kwargs": kwargs})
 
 
-class TaskSerializer:
-    """Serialize Python callables and arguments for MeshWeaver transport."""
+def deserialize_task(data: bytes):
+    """Reverse of serialize_task. Returns (func, args, kwargs)."""
+    obj = cloudpickle.loads(data)
+    return obj["func"], obj["args"], obj["kwargs"]
 
-    VERSION = 1
 
-    @classmethod
-    def serialize(
-        cls,
-        func: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> bytes:
-        if not callable(func):
-            raise TaskSerializationError("func must be callable")
+def serialize_result(value) -> bytes:
+    """Package a return value (or any picklable object) for the wire."""
+    return cloudpickle.dumps(value)
 
-        try:
-            payload = {
-                "version": cls.VERSION,
-                "task_id": cls.task_id(func, args, kwargs),
-                "function": base64.b64encode(
-                    cloudpickle.dumps(func)
-                ).decode("ascii"),
-                "args": base64.b64encode(
-                    cloudpickle.dumps(args)
-                ).decode("ascii"),
-                "kwargs": base64.b64encode(
-                    cloudpickle.dumps(kwargs)
-                ).decode("ascii"),
-            }
 
-            return json.dumps(
-                payload,
-                separators=(",", ":"),
-            ).encode("utf-8")
+def deserialize_result(data: bytes):
+    """Reverse of serialize_result."""
+    return cloudpickle.loads(data)
 
-        except Exception as exc:
-            raise TaskSerializationError(
-                f"Unable to serialize task: {exc}"
-            ) from exc
 
-    @classmethod
-    def deserialize(cls, payload: bytes) -> Dict[str, Any]:
-        try:
-            data = json.loads(payload.decode("utf-8"))
+if __name__ == "__main__":
+    def add(a, b):
+        return a + b
 
-            if data.get("version") != cls.VERSION:
-                raise TaskSerializationError(
-                    "Unsupported task payload version"
-                )
+    packed = serialize_task(add, 2, 3)
+    func, args, kwargs = deserialize_task(packed)
+    print(f"Round-tripped task: {func.__name__}(*{args}, **{kwargs}) = {func(*args, **kwargs)}")
 
-            func = cloudpickle.loads(
-                base64.b64decode(data["function"])
-            )
-            args = cloudpickle.loads(
-                base64.b64decode(data["args"])
-            )
-            kwargs = cloudpickle.loads(
-                base64.b64decode(data["kwargs"])
-            )
-
-            if not callable(func):
-                raise TaskSerializationError(
-                    "Deserialized object is not callable"
-                )
-
-            return {
-                "task_id": data["task_id"],
-                "function": func,
-                "args": args,
-                "kwargs": kwargs,
-            }
-
-        except TaskSerializationError:
-            raise
-        except Exception as exc:
-            raise TaskSerializationError(
-                f"Unable to deserialize task: {exc}"
-            ) from exc
-
-    @classmethod
-    def task_id(
-        cls,
-        func: Callable[..., Any],
-        args: tuple,
-        kwargs: dict,
-    ) -> str:
-        serialized = cloudpickle.dumps(
-            (func, args, kwargs)
-        )
-        return hashlib.sha256(serialized).hexdigest()[:16]
+    packed_result = serialize_result({"status": "ok", "value": 5})
+    print(f"Round-tripped result: {deserialize_result(packed_result)}")
