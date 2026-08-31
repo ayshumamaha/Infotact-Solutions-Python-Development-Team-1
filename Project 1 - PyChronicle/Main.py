@@ -23,7 +23,7 @@ def main():
 
     target_file = os.path.join(
         os.path.dirname(__file__),
-        "target_script.py"
+        "target_script.py")
 
     if not os.path.exists(target_file):
         print("Target Script Not Found!")
